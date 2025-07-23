@@ -2,8 +2,12 @@
 # combine_pdf.py
 """
 PDF Merger Application using Textual.
-Paste / drag‑and‑drop PDF paths → reorder with Shift+↑/↓ → Save/Load list → Merge.
-During merge shows *Merging…* label, then *Merged: <file>* once finished using a background thread so UI updates immediately.
+Paste / drag‑and‑drop PDF paths  → reorder with Shift+↑/↓ → Save/Load list → Merge.
+Shows current working directory at the top. If you paste / drop a **folder path**, the
+application changes to that directory while keeping the existing PDF list (paths are
+stored as absolute, so they remain valid).
+During merge the Merge button shows *Merging…* and switches to *Merged: <file>* when
+finished (background thread keeps UI responsive).
 """
 
 import os
@@ -23,10 +27,14 @@ from pypdf import PdfReader, PdfWriter
 JSON_FILE = "combine_pdf.json"
 
 class PdfMergerApp(App):
-    """Textual TUI for merging PDFs."""
+    """Textual TUI for merging PDFs and displaying current working directory."""
 
-    CSS = (
-        """
+    CSS = """
+#cwd-display {
+    dock: top;
+    content-align: left middle;
+    padding: 1;
+}
 #button-row {
     layout: horizontal;
     padding: 1;
@@ -36,9 +44,9 @@ class PdfMergerApp(App):
     overflow-x: auto;
 }
 """
-    )
 
     files: list[str] = reactive([])
+    cwd: str = reactive(os.getcwd())  # track current directory
 
     BINDINGS = [
         ("shift+up", "move_up", "Move selected up"),
@@ -51,8 +59,9 @@ class PdfMergerApp(App):
 
     # ─── Layout ──────────────────────────────────────────────────────────────
     def compose(self) -> ComposeResult:
+        yield Static(f"Current directory: {self.cwd}", id="cwd-display")
         yield Header(show_clock=True)
-        yield Static("📋 Paste or drop PDF paths (quoted or unquoted)")
+        yield Static("📋 Paste or drop PDF paths (quoted or unquoted) / folder paths to change directory")
         yield ListView(id="file-list")
         yield Horizontal(
             Button("Merge (m)", id="merge-button"),
@@ -76,17 +85,33 @@ class PdfMergerApp(App):
             lv.index = new_index
             lv.focus()
 
+    def _update_cwd_display(self) -> None:
+        self.query_one("#cwd-display", Static).update(f"Current directory: {self.cwd}")
+
     # ─── Paste / Drop ────────────────────────────────────────────────────────
     async def on_paste(self, event: Paste) -> None:
         txt = event.text.strip()
         pattern = r'"([^\"]+)"|(\S+)'
-        paths = [q or u for q, u in re.findall(pattern, txt)]
-        new = [p for p in paths if p.lower().endswith(".pdf")]
+        tokens = [q or u for q, u in re.findall(pattern, txt)]
+        if not tokens:
+            return
+        # Handle directories (take last dir in tokens if multiple)
+        dir_tokens = [t for t in tokens if os.path.isdir(t)]
+        if dir_tokens:
+            os.chdir(dir_tokens[-1])
+            self.cwd = os.getcwd()
+            self._update_cwd_display()
+            # remove dir tokens from list so they are not treated as PDFs
+            tokens = [t for t in tokens if t not in dir_tokens]
+        # Add PDF files
+        new = [p for p in tokens if p.lower().endswith(".pdf")]
         if new:
-            self.files.extend(new)
-            self._refresh_list(len(self.files) - len(new))
+            # store absolute paths to be independent of cwd changes
+            abs_new = [os.path.abspath(p) for p in new]
+            self.files.extend(abs_new)
+            self._refresh_list(len(self.files) - len(abs_new))
 
-    # ─── Reorder ────────────────────────────────────────────────────────────
+    # ─── Reorder ----------------------------------------------------------------
     def action_move_up(self) -> None:
         lv = self.query_one(ListView)
         i = lv.index
@@ -101,7 +126,7 @@ class PdfMergerApp(App):
             self.files[i + 1], self.files[i] = self.files[i], self.files[i + 1]
             self._refresh_list(i + 1)
 
-    # ─── Save / Load ────────────────────────────────────────────────────────
+    # ─── Save / Load ------------------------------------------------------------
     def action_save_list(self) -> None:
         btn = self.query_one("#save-button", Button)
         try:
@@ -131,14 +156,13 @@ class PdfMergerApp(App):
         btn.label = f"Loaded: {JSON_FILE}"
         btn.refresh(layout=True)
 
-    # ─── Merge ──────────────────────────────────────────────────────────────
+    # ─── Merge ------------------------------------------------------------------
     def action_merge(self) -> None:
+        btn = self.query_one("#merge-button", Button)
         if not self.files:
             self.bell(); return
-        btn = self.query_one("#merge-button", Button)
         btn.label = "Merging…"
         btn.refresh(layout=True)
-        # run merge in background to keep UI responsive
         threading.Thread(target=self._do_merge, args=(self.files.copy(),), daemon=True).start()
 
     def _do_merge(self, pdf_paths: list[str]) -> None:
@@ -158,10 +182,7 @@ class PdfMergerApp(App):
 
     def _merge_finished(self, output: str | None = None, error: str | None = None) -> None:
         btn = self.query_one("#merge-button", Button)
-        if error:
-            btn.label = f"Error: {error}"
-        else:
-            btn.label = f"Merged: {output}"
+        btn.label = f"Error: {error}" if error else f"Merged: {output}"
         btn.refresh(layout=True)
 
 if __name__ == "__main__":
